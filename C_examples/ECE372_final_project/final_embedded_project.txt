@@ -1,0 +1,377 @@
+/**
+ECE 372
+Summer term
+8 / 18 / 2017
+Matt Fleetwood, Portland, OR
+Project 2
+
+Uses the New Haven LCD to write text onto the screen.
+Polling is used instead of interrupts.
+**/
+
+//Defines Section
+#define HWREG(x) (*((volatile unsigned int *)(x)))
+
+//INTC defines
+#define INTC 0x48200000
+#define INTC_PENDING_IRQ2 0x482000D8
+#define INTCPS_INTC_CONTROL 0x48200048
+#define MIR_SET2 0xC4
+#define INTC_I2C1 0x00000080
+
+//Control Module Defines
+#define CON_MOD_BA 0x44E10000
+#define SPI0_D1 0x958
+#define SPI0_CS0 0x95C
+#define I2C_EN 0x00000072
+
+//I2C1 Defines
+#define I2C1_BA 0x4802A000
+#define I2C1_CLOCK 0x48
+#define I2C_SYSC 0x10
+#define I2C_PSC 0xB0
+#define I2C_SCLL 0xB4
+#define I2C_SCLH 0xB8
+#define I2C_CON 0xA4
+#define I2C_CNT 0x98
+#define I2C_DATA 0x9C
+#define I2C_IRQ_SET 0x2C
+#define I2C_IRQ_RAW 0x24
+#define I2C_SA 0xAC
+#define I2C_IRQ 0x24
+
+//other defines
+#define CM_PER 0x44E00000
+
+//Value defines
+#define TURN_ON 0x2
+#define MSTR_TRSMTR 0x00008600
+#define START 0x00008603
+
+//Function Declarations
+void I2C1_init(void);
+void I2C_do_transmit(unsigned int dcount);
+void delay(void);
+void I2C1_interrupt_handler(void);
+void init_LCD(void);
+void no_int_send(unsigned int dcount);
+
+//global variables
+//these are the variables I used just for ideas
+volatile unsigned int flag = 1;             //dcount reached 0 flag
+volatile unsigned char data_to_slave[19] = "pNo hacks required";   //array holding what to send
+volatile unsigned int num_of_bytes = 19;     //number of bytes to send
+volatile unsigned char data_to_slave2[18] = "pJust another day";   //array holding what to send
+volatile unsigned int num_of_bytes2 = 18;     //number of bytes to send
+volatile unsigned int t_count = 0;          //number of sent bytes
+volatile unsigned int USR_STACK[100];
+volatile unsigned int INT_STACK[100];
+
+int main(void)
+{
+        //this will disable interrupts for the initialization
+	asm("	mrs		r0, CPSR\n\t"
+			"	orr		r0, r0, #0x80\n\t"
+			"	msr		CPSR_c, R0");
+	//SET UP STACKS
+	//init USR stack
+	asm("LDR R13, =USR_STACK");
+	asm("ADD R13, R13, #0x100");
+	//init IRQ stack
+	asm("CPS #0x12");
+	asm("LDR R13, =INT_STACK");
+	asm("ADD R13, R13, #0x100");
+	asm("CPS #0x13");
+
+	//Call initialization function for I2C1 clock enable, software reset, mux mode changed to 2,
+        //PSC, SCLL, SCLH, CON, and SA registers set
+        I2C1_init();
+
+        //Give the LCD time to think
+        delay();
+
+        //Initiatlize the New Haven LCD to default format
+        init_LCD();
+
+        delay();
+
+        //Send the message from the data_to_slave array using polling instead of interrupts
+        no_int_send(num_of_bytes);
+
+        //enable irqs
+	    asm("	mrs		r0, CPSR\n\t"
+			"	bic		r0, r0, #0x80\n\t"
+			"	msr		CPSR_c, R0");
+
+        //set up data_to_slave with correct LCD init values for the New Haven LCD
+        //from http://www.newhavendisplay.com/specs/NHD-C0220BiZ-FSW-FBW-3V3M.pdf
+	    I2C_do_transmit(num_of_bytes2);
+
+        //Do-nothing loop
+	    while(1)
+	     {}
+	    return 0;
+}
+
+//Enable the clocks, software resets, and IRQs. Set the CON, PSC, SCLL, SCLH, and SA registers
+void I2C1_init(void)
+{
+	//I2C 1 INIT
+        //Wake-up I2C1
+        HWREG(CM_PER + I2C1_CLOCK) = 0x02;
+
+	//Sofware reset by setting SRST bit in the I2C_SYSC reg
+        HWREG(I2C1_BA + I2C_SYSC) = TURN_ON;
+
+	//Write wake-up value to I2C_SYSC
+        HWREG(I2C1_BA + I2C_SYSC) = 0x4;
+
+        //Reset INTC by writing to INTC_CONFIG register
+        HWREG(INTC + 0x10) = TURN_ON;
+
+	//INTC INIT
+        //Unmask IRQ for I2C1
+        HWREG(INTC + MIR_SET2) = INTC_I2C1;
+
+        //Set SPI registers in the control module with pull-up resistors, slew rate, and MUX mode
+        //to enable I2C1
+        HWREG(CON_MOD_BA + SPI0_CS0) = I2C_EN; //Write 0x12 to the spi0_cs0 reg at offset 0x95C for the I2C1_SCL
+        HWREG(CON_MOD_BA + SPI0_D1) = I2C_EN; //Write 0x12 to the spi0_d1 reg at offset 0x958 for the I2C1_SDA
+
+        //Program I2C1 prescaler for approx. 12 MHz into the module
+        HWREG(I2C1_BA + I2C_PSC) = 0x03;  //Divide the system clock, SCLK (192 MHz), by 16 to get ~12-MHz I2C module clk
+
+	//100 Kbps bus clock
+	HWREG(I2C1_BA + I2C_SCLL) = 0x37;  //55 in decimal
+        HWREG(I2C1_BA + I2C_SCLH) = 0x39;  //56 in decimal
+
+        //Get out of reset mode
+        HWREG(I2C1_BA + I2C_CON) = 0x00008600;
+
+	//Configure slave address
+	HWREG(I2C1_BA + I2C_SA) = 0x3C; //Slave address is 0x3C for the New Haven device
+
+	return;
+}
+
+//Initialize the New Haven LCD screen according to its documentation
+void init_LCD(void)
+{
+	//Set the COUNT reg with the number of init values
+	HWREG(I2C1_BA + I2C_CNT) = 11;
+
+    //Check if the bus is free by polling the busy bit in the IRQ_RAW reg
+    while(1 == (HWREG(I2C1_BA + I2C_IRQ_RAW) & 0x1000))
+       		{ //Do nothing... waiting for bus to be free
+      		}
+
+    //Give the LCD time to think...
+    delay();
+
+  	//Begin the I2C1 transmit by toggling the bits in the CON reg
+ 	 HWREG(I2C1_BA + I2C_CON) = START;
+
+  	//Give the LCD time to think...
+  	delay();
+
+  	//Send the hex values from the New Haven data sheet to complete the setup for the LCD
+  	HWREG(I2C1_BA + I2C_DATA) = 60; //60 "Slave address" (in decimal)
+  	while(0 == ((HWREG(I2C1_BA + I2C_IRQ_RAW) & 0x10)))
+   		{ //Do nothing... waiting for XRDY to be free
+  		}
+	delay();
+  	HWREG(I2C1_BA + I2C_DATA) = 0; //0 Comsend = 0x00
+	   while(0 == (HWREG(I2C1_BA + I2C_IRQ_RAW) & 0x10))
+		{ //Do nothing... waiting for XRDY
+	     }
+	delay();
+  	HWREG(I2C1_BA + I2C_DATA) = 56; //56
+	   while(0 == (HWREG(I2C1_BA + I2C_IRQ_RAW) & 0x10))
+		{ //Do nothing... waiting for XRDY
+	     }
+  	delay();
+  	HWREG(I2C1_BA + I2C_DATA) = 57; //57
+	   while(0 == (HWREG(I2C1_BA + I2C_IRQ_RAW) & 0x10))
+		{ //Do nothing... waiting for XRDY
+	     }
+  	delay();
+  	HWREG(I2C1_BA + I2C_DATA) = 20; //20
+	   while(0 == (HWREG(I2C1_BA + I2C_IRQ_RAW) & 0x10))
+		{ //Do nothing... waiting for XRDY
+	     }
+	delay();
+  	HWREG(I2C1_BA + I2C_DATA) = 120; //120
+	   while(0 == (HWREG(I2C1_BA + I2C_IRQ_RAW) & 0x10))
+		{ //Do nothing... waiting for XRDY
+	     }
+	delay();
+  	HWREG(I2C1_BA + I2C_DATA) = 94; //94
+	   while(0 == (HWREG(I2C1_BA + I2C_IRQ_RAW) & 0x10))
+		{ //Do nothing... waiting for XRDY
+	     }
+	delay();
+  	HWREG(I2C1_BA + I2C_DATA) = 109; //109
+	   while(0 == (HWREG(I2C1_BA + I2C_IRQ_RAW) & 0x10))
+		{ //Do nothing... waiting for XRDY
+	     }
+	delay();
+  	HWREG(I2C1_BA + I2C_DATA) = 12; //12
+	   while(0 == (HWREG(I2C1_BA + I2C_IRQ_RAW) & 0x10))
+		{ //Do nothing... waiting for XRDY
+	     }
+ 	HWREG(I2C1_BA + I2C_DATA) = 1; //1
+	   while(0 == (HWREG(I2C1_BA + I2C_IRQ_RAW) & 0x10))
+		{ //Do nothing... waiting for XRDY
+	     }
+	delay();
+	   while(0 == (HWREG(I2C1_BA + I2C_IRQ_RAW) & 0x10))
+		{ //Do nothing... waiting for XRDY
+	     }
+  	HWREG(I2C1_BA + I2C_DATA) = 6; //6
+  	delay();
+
+  	return;
+}
+
+//Set char counter, Master + Transmitter mode, dcount, interrupts, cleanup + set ints, begin start bit
+//to begin interrupt transmission
+void I2C_do_transmit(unsigned int dcount)
+{
+	//Operating mode set to Master Transmitter
+   	HWREG(I2C1_BA + I2C_CON) = MSTR_TRSMTR;
+
+	//set dcount
+	HWREG(I2C1_BA + I2C_CNT) = dcount; //Total number of bytes in the msg
+
+	//cleanup interrupts
+    HWREG(I2C1_BA + I2C_IRQ_RAW) = 0x114;
+
+	//set correct interrupts
+	//Enable BF_E, XRDY_IE, and ARDY_IE
+    HWREG(I2C1_BA + I2C_IRQ_SET) = 0x00000114; 	 //Set bit 4, XRDY_IE, to enable transmit data ready, bit 2 for ARDY_IE
+        				     	                 //and set bit 8, BF_E, to enable bus free ready
+    //Generate a start condition
+    HWREG(I2C1_BA + I2C_CON) = 0x1;
+
+	while(flag) //waiting for flag
+	{
+
+	}
+
+	while(0 == (HWREG(I2C1_BA + I2C_IRQ_RAW) & 0x4)) //checking stop condition
+	{
+
+	}
+
+	flag = 1;
+
+        return;
+}
+
+//Transmit a message using polling (no interrupts)
+void no_int_send(unsigned int dcount)
+{
+      //Set DCOUNT in the COUNT reg
+      HWREG(I2C1_BA + I2C_CNT) = dcount;
+
+      //Give the LCD time to think
+      delay();
+
+      //Check if the bus is free by polling the busy bit in the IRQ_RAW reg
+      while(1 == (HWREG(I2C1_BA + I2C_IRQ_RAW) & 0x1000))
+       		{ //Do nothing... waiting for bus to be free
+    	    }
+
+      delay();
+
+      //Begin the I2C1 transmit by toggling Master Transmitter mode, and the start and stop bits in the CON reg
+      HWREG(I2C1_BA + I2C_CON) = START;
+
+      delay();
+
+      int msg_sent = 0;
+      while(msg_sent != 19) //While there are still chars to send, transmit the message
+           {
+            //Check if XRDY is asserted by polling the XRDY bit in the IRQ_RAW reg
+    	   while(0 == (HWREG(I2C1_BA + I2C_IRQ_RAW) & 0x10))
+       		{ //Do nothing... waiting for XRDY
+      	     }
+
+      	    delay();
+            //Send a char or byte from the message array using the msg_sent counter as an index
+            HWREG(I2C1_BA + I2C_DATA) = data_to_slave[msg_sent];
+            msg_sent = msg_sent + 1; //Get to the next char in the message
+           }
+
+      return;
+}
+
+//This function will be hooked in the startup_ARMCA8.s file
+void int_handler(void){
+     //Do not STMFD / LDMFD; the LR is automatically saved
+
+     //HWREG(INTC + MIR_SET2) = 0;
+     //Check for I2C1 interrupts on PENDING_IRQ2
+     if(HWREG(INTC_PENDING_IRQ2) == INTC_I2C1) //INTC_I2C1 = 0x00000080
+        I2C1_interrupt_handler();
+
+     HWREG(INTCPS_INTC_CONTROL) = 0x1; //This value also resets
+     asm("LDMFD SP!, {R11}"); //Gets rid of the extra stack value
+     asm("LDMFD SP!, {LR}"); //Gets the correct LR value back
+     asm("SUBS PC, LR, #0x4"); //Goes back to wait-loop, USR mode
+}
+
+//Responds to the I2C1 interrupts by sending a message to the New Haven LCD
+void I2C1_interrupt_handler(void)
+{
+	int status = 0;
+        //get IRQ status
+        status = HWREG(I2C1_BA + I2C_IRQ_RAW);
+
+	if(status & 0x10)	//transmit ready
+	{
+		//send next character
+	        HWREG(I2C1_BA + I2C_DATA) = data_to_slave2[t_count];
+	        delay();
+		//clear transmit ready IRQ
+        HWREG(I2C1_BA + I2C_IRQ_RAW) = 0x00000010;
+		//Update the char counter
+        t_count = t_count + 1;
+		if(t_count == num_of_bytes2)
+		{
+			//disable transmit interrupts
+            HWREG(I2C1_BA + I2C_IRQ_RAW) = 0x00000010;
+
+		}
+	}
+
+	if(status & 0x100)	//stop condition (bus free)
+	{
+		//disable correct interrupts
+        HWREG(I2C1_BA + I2C_IRQ_RAW) = 0x00000114;
+        //Clear I2C1 interrupt requests in the ITR register
+        HWREG(INTC + 0xC0) = 0x00000080;
+		flag = 0;
+	}
+
+	if(status & 0x2)    //f in an error state
+	{
+		//HWREG(I2C1_BA + I2C1_IRQ_DIS) = 0x11A;
+		HWREG(I2C1_BA + I2C_CON) |= 0x2;
+		flag = 0;
+	}
+
+    return;
+}
+
+//Use this to give the LCD board time to think
+void delay(void)
+{
+	int y;
+	for(y = 0; y <= 10000; y ++)
+	{
+		//small delay
+	}
+
+	return;
+}
