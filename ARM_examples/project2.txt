@@ -1,0 +1,187 @@
+@Final version of Project 2
+@Lights the four USR LEDs on the Beaglebone Black (BBB) such that they animate like KITT's lights from the show
+@Knight Rider, when the pushbutton connected to pin 20 (GPIO1_31, or bit 31 in GPIO1) is pushed. The pushbutton
+@causes an interrupt, which causes timers to start counting.The timers count for half-second intervals and cause 
+@interrupts, which serves for the timing to light the LEDs at the right moment.
+@Matt Fleetwood, Portland, OR
+
+.text
+.global _start
+.global INT_DIRECTOR
+_start:
+												
+			  LDR		R0, =0x4804C000			@Base address for GPIO1 registers
+			  ADD		R4, R0, #0x190			@Address of GPIO1_CLEARDATAOUT register
+			  LDR		R7, =0x01E00000			@Load value to turn off LED on GPIO1_21 - 24
+			  STR		R7, [R4]			@Write to GPIO1_CLEARDATAOUT register
+			  
+			  @Program GPIPO1_21 - 24 as output
+			  ADD		R1, R0, #0x0134			@Make GPIO1_OE register address
+			  LDR		R6, [R1]			@READ current GPIO1 OE register
+			  LDR	    	R7, =0xFE1FFFFF			@Word to enable GPIO1_21 - 24 as output (0 enables)
+			  AND		R6, R7, R6			@Clear bit 21 - 24 (MODIFY)
+			  STR		R6, [R1]			@WRITE to GPIO1 OE register
+			  
+			  @Detect falling edge on GPIO1_31 and enable to assert POINTRPEND1
+			  ADD		R1, R0, #0x14C			@R1 = address of GPIO1_FALLINGDETECT register
+			  MOV		R2, #0x80000000			@Load value for bit 31
+			  LDR		R3, [R1]			@Read GPIO1_FALLINGDETECT register
+			  ORR		R3, R3, R2			@Modify (set bit 31)
+			  STR		R3, [R1]			@Write back
+			  ADD		R1, R0, #0x34			@Address of GPIO1_IRQSTATUS_SET_0 register
+			  STR		R2, [R1]			@Enable GPIO1_31 request on POINTRPEND1
+			  
+			  @Initialize INTC
+			  LDR		R1, =0x48200000			@Base address for INTC
+			  MOV		R2, #0x2			@Value to reset INTC
+			  STR		R2, [R1, #0x10]			@Write to INTC Config register
+			  MOV		R2, #0x10			@Unmask INTC INT 68, Timer2 interrupt
+			  STR		R2, [R1, #0xC8]			@Write to INTC_MIR_CLEAR2 register
+			  MOV		R2, #0x04			@Value to unmask INTC INT 98, GPIOINTA
+			  STR		R2, [R1, #0xE8]			@Write to INTC_MIR_CLEAR3 register			  
+			  
+			  @Turn on Timer2 CLK
+			  MOV		R2, #0x2			@Value to enable Timer2 CLK
+			  LDR		R1, =0x44E00080			@Address of CM_PER_TIMER2_CLKCTRL
+			  STR		R2, [R1]			@Turn on
+			  LDR		R1, =0x44E00508			@Address of PRCMCLKSEL_TIMER2 register
+			  STR		R2, [R1]			@Select 32 KHz CLK for Timer2
+			  
+			  @Initialize Timer 2 registers, with count, overflow interrupt generation
+			  LDR		R1, =0x48040000			@Base address for Timer2 registers
+			  MOV		R2, #0x1		        @Value to reset Timer2
+			  STR		R2, [R1, #0x10]			@Write to Timer2 CFG register
+			  MOV		R2, #0x2			@Value to enable Overflow interrupt
+			  STR		R2, [R1, #0x2C]			@Write to Timer2 IRQENABLE_SET
+			  LDR		R2, =0xFFFFC000			@Count value for 0.5 seconds
+			  STR		R2, [R1, #0x40]			@Timer2 TLDR load register (Reload value)
+			  STR		R2, [R1, #0x3C]			@Write to Timer2 TCRR count register
+			  
+			  @Enable IRQ in CPSR
+			  MRS		R3, CPSR			@Copy CPSR to R3
+			  BIC		R3, #0x80			@Clear bit 7
+			  MSR		CPSR_c, R3			@Write back to CPSR  
+			  MOV		R0, #0				@Init the LED counter to 1
+			  	
+MAIN:		  	  @Mainline for the program, loops until an interrupt occurs
+		     	  LDR		R11, =BTTN_PRS			@Set ptr to the memory flag
+		     	  LDR		R2, [R11]			@Get the memory flag
+		      	  CMP		R2, #0				@Is the flag 0?
+		          BNE		TOGGLE_ANIMATION		@No, turn on LED
+		          LDR		R11, =TIMER			@Get the TIMER memory flag
+		          LDR		R2, [R11]			@Get state of TIMER mem flag
+		          CMP		R2, #0				@Check if TIMER flag is 0
+		          BNE		UPDATE_LEDS			@No, so update LEDs
+		          B		MAIN			   	@Loop to main
+		      
+
+TOGGLE_ANIMATION:	  @Toggles the animation status flag	
+			  MOV		R2, #0				@Clear button flag
+			  STR		R2, [R11]			@Write to button flag
+			  LDR		R11, =LED_state			@Load ptr to LED_state flag
+			  LDR		R2, [R11]			@Get LED_state value
+			  CMP		R2, #0				@Is the LED_state value 0?
+			  BEQ		START_ANIMATION			@Yes, so start LED animation
+			  B		STOP_ANIMATION			@No, so stop the LED animation
+			  
+
+START_ANIMATION:	  @Start the timer and change the LED_state flag to 1
+			  MOV		R2, #1				@Set new LED_state to 1
+			  STR		R2, [R11]			@Write to LED_state
+			  MOV		R2, #0x03			@Load val to auto reload timer and start
+			  LDR		R11, =0x48040038		@Address of Timer2 TCLR register
+			  STR		R2, [R11]			@Write to TCLR register
+			  B		MAIN				@Return to the mainline
+			  
+STOP_ANIMATION:	   	  @Turns off lights, sets LED_state to 0, auto reloads timer and starts it
+			  BL		OFF				@Turn all LEDs off
+			  MOV		R2, #0				@Set new LED_state to 1
+			  STR		R2, [R11]			@Write to LED_state
+			  MOV		R2, #0x0			@Load val to auto reload timer and start
+			  LDR		R11, =0x48040038		@Address of Timer2 TCLR register
+			  STR		R2, [R11]			@Write to TCLR register
+			  B		MAIN				@Return to mainline
+			  
+UPDATE_LEDS:		  @Clears TIMER flag, turns off lights, then begins the animation sequence
+	         	  LDR		R11, =TIMER			@Get TIMER flag address
+	                  MOV		R2, #0				@Value to clear flag
+	                  STR		R2, [R11]			@Write back to the flag
+	                  BL		OFF				@Turn off the LEDs
+	                  LDR        	R11, =SEQUENCE			@Get the first element in SEQUENCE
+	                  LDR		R2, [R11, R0]         		@Add the offset in R0 to get to the next element in SEQUENCE
+	                  LSL		R5, R2, #21			@Shift counter left by 20 to map to GPIO pins
+             		  LDR 		R6, =0x4804C194			@Load address of GPIO1_SETDATAOUT register
+            		  STR		R5, [R6]			@Write to GPIO1_SETDATAOUT register	
+            		  ADD 		R0, R0, #4			@Increment the counter 
+            		  CMP		R0, #24				@Check if the counter has reached the end
+            		  MOVEQ		R0, #0				@Yes, so reset it with 0
+            		  B		MAIN				@Return to the mainline				  					      		 
+               
+OFF:		  	  @Turns the LEDs off
+			  STMFD	SP!, {R4 - R10, LR}			@Save all used registers
+			  LDR		R8, =0x4804C000			@Base address for GPIO1 registers
+			  ADD		R4, R8, #0x190			@Address of GPIO1_CLEARDATAOUT register
+			  LDR		R7, =0x01E00000			@Load value to turn off LED on GPIO1_21 - 24
+			  STR		R7, [R4]			@Write to GPIO1_CLEARDATAOUT register
+			  LDMFD	SP!, {R4 - R10, PC}	   	   	@restore all used registers
+					  
+INT_DIRECTOR:		  @Control structure for responding to interrupts (pushbutton and timer used here)
+			  STMFD		SP!, {R0-R3, LR}		@Push registers on stack
+			  LDR		R0, =0x482000F8			@Address of INTC-PENDING_IRQ3 register
+			  LDR		R1, [R0]			@Read INTC-PENDING-IRQ3 register
+			  TST		R1, #0x4			@TEST bit 2
+			  BEQ		TCHK				@Not GPIOINT1A, check if Timer2, else
+			  LDR		R0, =0x4804C02C			@GPIO1_IRQstatus_0
+			  LDR		R1, [R0]			@Read STATUS register
+			  TST		R1, #0x80000000			@Check if bit 31 = 1
+			  BNE		BUTTON_SVC			@If bit 31 = 1, then button pushed
+			  LDR		R0, =0x48200048			@INTC_CONTROL register
+			  B	        RET_MAIN			@If bit 31 = 0, then go back to wait loop
+			  
+RET_MAIN:		  @Label handles code returning from the interrupt routine(s) to the mainline
+			  LDR		R0, =0x48200048			@Address of INTC_CONTROL register
+			  MOV		R1, #01				@Value to clear bit 0
+			  STR		R1, [R0]			@Write to INTC_CONTROL register
+			  LDMFD		SP!, {R0-R3, LR}		@Restore registers
+			  SUBS		PC, LR, #4			@Pass execution on to wait loop (main) for now
+			  
+TCHK:			  @Checks if the interrupts was from the timer, if true also checks for overflow (toggling if there is overflow)
+			  LDR		R1, =0x482000D8			@Address of INTC PENDING_IRQ2 register
+			  LDR		R0, [R1]			@Read value
+			  TST		R0, #0x10			@Check if interrupt from Timer2
+			  BEQ		RET_MAIN			@Not from Timer2 so return to MAIN loop
+			  LDR		R1, =0x48040028			@Address of Timer2 IRQSTATUS register
+			  LDR		R0, [R1]			@Read value
+			  TST		R0, #0x2			@Check bit 1
+			  BNE		LED				@If Overflow, then toggle status flag for LED animation
+			  B		RET_MAIN			@If here, no overflow so return to MAIN loop
+
+LED:		          @Turn off Timer2 interrupt request and enable INTC for next IRQ
+			  LDR		R1, =0x48040028			@Address of INTC PENDING_IRQ2 register
+			  MOV		R2, #0x2			@Value to turn off
+			  STR		R2, [R1]			@Write back  
+			  @Toggle status flag
+			  LDR		R6, =TIMER			@Load ptr to LED_state flag
+			  MOV		R4, #0x1			@Value to start the timer
+			  STR		R4, [R6]			@Set the flag
+			  B		RET_MAIN			@Return to MAIN loop
+
+BUTTON_SVC:		  @Handles interrupt requests from the button
+			  LDR		R0, =0x4804C02C			@GPIO1_IRQstatus_0
+			  LDR		R1, =0x80000000			@Value turns off GPIO1_31 Interrupt request
+			  STR		R1, [R0]			@Write to GPIO1_IRQSTATUS_0 register
+			  
+			  @Toggle memory flag
+			  LDR		R0, =BTTN_PRS			@Load ptr to memory flag
+			  MOV		R1, #1				@Set button flag to 1
+			  STR		R1, [R0]			@Store the new memory flag state
+			  B		RET_MAIN			@Go back to the mainline  
+			  
+.data
+
+BTTN_PRS:	  .word 0x0						@Memory flag is 0 if lights are off, 1 if lights are on		  
+LED_state:	  .word 0x0						@Memory flag is 0 if the timer was cleared in MAIN, 1 if it was set in the Timer2 routine
+TIMER:		  .word 0x0						@Memory flag for the timer   
+SEQUENCE:	  .word 1,2,4,8,4,2					@SEQUENCE represents the order in which to light the LEDs such that they animate like	
+									@KITT's lights from Knight Rider
+.end

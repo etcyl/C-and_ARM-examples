@@ -1,0 +1,100 @@
+@Final version of Project 1
+@Lights the BBB USR LEDs in gray code, based on the 0 - 15 counter,
+@for about 1 second then repeats forever. If the pushbutton is pressed,
+@then the output changes from gray code to binary.
+@Matt Fleetwood, Portland, OR
+
+.text
+.global _start
+_start:
+.EQU WAIT_VAL, 3500900						    @WAIT_VAL is a constant for simulating a delay in the BBB
+												@the constant is decremented by 1 until it reaches 0 to simulate
+												@time elapsing; for this project, 1 second is ideal 												
+ 			  MOV		R3, #0					@init the 0 - 15 counter to 0
+LED_loop:
+              LDR		R1, =0x4804C138			@address of GPIO1_OE register
+              LDR		R8, [R1]				@READ GPIO1_OE register
+              BIC		R8, R8, #0x7FFFFFFF		@if bit #14 is 1, output in grey code. else, output in bin
+              CMP		R8, #0x80000000         @check if the pushbutton bit is a 0 or 1
+              BNE       bin					    @output in binary
+              B			gray					    @output in gray code
+bin:
+              LSL		R5, R3, #21				@shift counter left by 20 to map to GPIO pins
+              LDR 		R6, =0x4804C194			@Load address of GPIO1_SETDATAOUT register
+              STR		R5, [R6]				@Write to GPIO1_SETDATAOUT register
+              LDR		R2, [R1]				@READ GPIO1_OE register
+              AND		R2, R2, R0				@MODIFY word read in
+              STR		R2, [R1]
+              BL		wait					@call function to simulate a one-second delay
+              B			off					@branch to label off to turn off the LEDs
+gray:
+			  
+			  BL		bin_to_gray
+              BL		wait					@function call wait to simulate a 1 second delay
+              
+off:          LDR 		R6, =0x4804C190			@Load address of GPIO1_SETDATAOUT register
+              MOV		R5, #0x01E00000			@word to set GPIO pins to low         
+              STR		R5, [R6]				@Write to GPIO1_SETDATAOUT register
+              LDR		R0, =0xFE1FFFFF			@load word to program GPIO21 - 24 as output
+              LDR		R1, =0x4804C134			@address of GPIO1_OE register
+              LDR		R2, [R1]				@READ GPIO1_OE register
+              AND		R2, R2, R0				@MODIFY word read in
+              STR		R2, [R1]
+              ADD		R3, R3, #1				@increment the 0 - 15 counter by 1
+              CMP		R3, #16					@check if the 0 - 15 counter has gone past 15
+              BEQ		reset
+              B			LED_loop				@return to LED_loop to turn on / off USR LEDs forever 
+reset:
+			  MOV		R3, #0					@reset the 0 - 15 counter to 0           
+              B			LED_loop				@return to LED_loop to turn on / off USR LEDs forever           
+              
+wait:		  @wait function for causing the BBB a roughly 1 second delay
+			  STMFD		SP!, {R4 - R10, R14}	@save all registers to the stack
+			  @MOV		R4, #WAIT_VAL			@put a large value into R1 so it can be decremented to 0
+			  LDR		R4, =WAIT_VAL
+			  
+loop:		  @loop for decrementing a large value until it reaches 0 to simulate a 1 second delay
+			  SUB		R4, R4, #1				@subtract 1 from the large constant value and put new value in R1
+			  CMP		R4, #0					@check if the value is 0 yet
+			  BNE		loop					@branch to loop label if the value has not reached 0 yet
+			  LDMFD		SP!, {R4 - R10, PC}		@restore the registers from the stack
+			  
+bin_to_gray:
+			  @bin_to_gray function accepts a binary number and returns 
+			  @the gray code equivalent in LEDs on the BBB
+			  STMFD		SP!, {R4 - R10, R14}
+			  BIC		R0, R3, #0xE			@get the first bit in R3
+		 	  BIC		R1, R3, #0xD			@get the second bit in R3
+		 	  LSR		R2, R1, #1				@put the second bit into the first bit's position
+			  EOR		R5, R2, R0				@get the first grey code bit
+			  BIC		R1, R3, #0xB			@get the third bit in R3
+			  LSR		R1, R1, #2				@shift the third bit into the second bit's position
+			  EOR		R0, R2, R1				@first step to getting second grey code bit
+			  LSL		R0, R0, #1				@second step to getting second grey code bit
+			  ADD		R5, R5, R0				@combine first and second grey code bits
+			  BIC		R0, R3, #7				@get the fourth bit in R3
+		      LSR		R2, R0, #3				@put the fourth bit into the first bit's position
+			  EOR		R2, R2, R1				@first step to getting the third grey code bit
+			  LSL		R2, R2, #2				@second step to getting the grey code bit
+			  ADD		R5, R5, R2				@combine first, second, and third grey code bits
+			  ADD		R5, R5, R0				@form the final grey code value 
+			  LSL		R5, R5, #21				@shift counter left by 20 to map to GPIO pins 
+			  LDR		R0, =0xFE1FFFFF			@load word to program GPIO21 - 24
+              LDR		R1, =0x4804C134			@address of GPIO1_OE register
+              LDR		R2, [R1]				@READ GPIO1_OE register
+              AND		R2, R2, R0				@MODIFY the word read in
+              STR		R2, [R1]				@WRITE back to GPIO1_OE register
+              LDR 		R6, =0x4804C194			@Load address of GPIO1_SETDATAOUT register
+              STR		R5, [R6]				@Write to GPIO1_SETDATAOUT register
+              LDR		R2, [R1]				@READ GPIO1_OE register
+              AND		R2, R2, R0				@MODIFY word read in
+              STR		R2, [R1]
+              LDMFD		SP!, {R4 - R10, PC}		@restore the registers from the stack
+			  
+.data
+STACK:					.rept					@reserve 256 bytes for stack with init 0x00
+						.byte 0x00
+						.endr
+			
+.end
+
